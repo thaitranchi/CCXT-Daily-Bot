@@ -96,14 +96,41 @@ class StrategyParams:
     @property
     def label(self) -> str:
         if self.sizing == "vol_target":
-            stop = f"{self.atr_stop_mult:g}xATR"
-        else:
-            stop = f"{self.stop_pct:.1%}"
-        return f"{self.signal} SMA{self.sma_period} {stop}/{self.target_pct:.1%}"
+            # The stop distance is an ATR multiple, so printing target_pct as a
+            # percentage would describe a level this strategy never uses. Report
+            # the reward:risk ratio instead, which is what the numbers mean.
+            ratio = self.target_pct / self.stop_pct if self.stop_pct else 0.0
+            return (
+                f"{self.signal} SMA{self.sma_period} "
+                f"{self.atr_stop_mult:g}xATR stop, {ratio:g}:1 R:R "
+                f"({self.risk_pct:.2%} risk)"
+            )
+        return f"{self.signal} SMA{self.sma_period} {self.stop_pct:.1%}/{self.target_pct:.1%}"
 
 
 def params_from_config() -> StrategyParams:
-    """The live strategy's parameters, for parity-checking the backtest."""
+    """The live strategy's parameters, for parity-checking the backtest.
+
+    Reads ``config.SIZING_MODE`` so this always describes the bot that would
+    actually trade. Hardcoding the old fixed bracket here would mean the backtest
+    reported on a strategy nobody runs.
+    """
+    if config.SIZING_MODE == "vol_target":
+        # stop_pct is only a denominator for the reward:risk ratio under
+        # volatility targeting; the absolute stop distance comes from ATR.
+        return StrategyParams(
+            sma_period=config.SMA_PERIOD,
+            stop_pct=0.01,
+            target_pct=0.01 * config.TARGET_RATIO,
+            notional=0.0,
+            fee_pct=config.TAKER_FEE_PCT,
+            signal="baseline",
+            sizing="vol_target",
+            risk_pct=config.RISK_PCT,
+            atr_stop_mult=config.ATR_STOP_MULT,
+            atr_period=config.ATR_PERIOD,
+            starting_equity=config.ACCOUNT_EQUITY_USD,
+        )
     return StrategyParams(
         sma_period=config.SMA_PERIOD,
         stop_pct=config.STOP_LOSS_PCT,
@@ -586,6 +613,23 @@ def summarise(trades: list[dict[str, Any]], params: StrategyParams) -> None:
             stats["required_win_rate"] * 100,
             stats["win_rate"] * 100,
         )
+    # A green verdict on one symbol's own history is the most misleading line in
+    # this project, so it never ships without its own disclaimers attached.
+    LOGGER.info(
+        "CAVEAT       : this is ONE still-listed symbol over its FULL history. It is"
+    )
+    LOGGER.info(
+        "               in-sample (no parameter was held out) and survivor-biased"
+    )
+    LOGGER.info(
+        "               (the coins that went to zero are absent by construction)."
+    )
+    LOGGER.info(
+        "               It is a sanity check on the engine, NOT evidence of an edge."
+    )
+    LOGGER.info(
+        "               For that, run walkforward.py -- see the README findings."
+    )
 
 
 def print_trades(trades: list[dict[str, Any]], limit: int = 15) -> None:

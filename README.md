@@ -176,12 +176,23 @@ SYMBOL = "BTC/USDT"
 TIMEFRAME = "1d"
 SMA_PERIOD = 20
 
-TRADE_SIZE_USD = 20.0         # Notional per trade
-STOP_LOSS_PCT = 0.02          # 2% stop  ─┐
-TAKE_PROFIT_PCT = 0.04        # 4% target ─┘  2:1 reward:risk
+# Risk. SIZING_MODE = "vol_target" derives the stop from ATR and sizes the
+# position so a constant share of equity is at risk. See "What the research
+# actually found" for why this replaced the old fixed 2%/4% bracket.
+SIZING_MODE = "vol_target"
+RISK_PCT = 0.01               # Share of equity at risk per trade
+ATR_PERIOD = 14
+ATR_STOP_MULT = 2.0           # Stop sits 2x ATR below entry
+TARGET_RATIO = 2.0            # Target sits 2x the stop distance away
+MAX_NOTIONAL_USD = 200.0      # Hard ceiling per position
+ACCOUNT_EQUITY_USD = 200.0    # Sizing basis when the live balance is unreadable
 
 PAPER_TRADING = True          # Flip to False only after validating paper output
 ```
+
+> `ACCOUNT_EQUITY_USD` determines position size in paper mode. Set it to the size
+> of the account you actually intend to trade — in live mode the real balance is
+> read instead and this value is only a fallback.
 
 ### 5. Run it
 
@@ -196,39 +207,53 @@ expect. Only then consider setting `PAPER_TRADING = False`.
 
 ## Strategy Logic
 
-1. **Data.** Fetch 30 daily candles via `fetch_ohlcv`.
+1. **Data.** Fetch 40 daily candles via `fetch_ohlcv`.
 2. **Drop the forming candle.** The last row returned is the *current, still-open*
    UTC day. Using it would compare a live intrabar tick against an SMA that
    already contains it, and the signal could flip mid-day. The decision is made
    on the last **closed** candle instead.
-3. **Indicator.** 20-period SMA of closes.
+3. **Indicator.** 20-period SMA of closes, plus 14-period ATR.
 4. **Signal.** Close above SMA → bullish. Otherwise no action.
-5. **Sizing.** `TRADE_SIZE_USD / price`, truncated to the exchange's lot step,
-   then validated against the venue's minimum amount and minimum notional.
-6. **Execution (live only).** Market buy, then a `stop_loss_limit` sell 2% below
-   and a `limit` sell 4% above, both for the *filled* quantity.
-7. **Exit.** The script ends. The exchange takes it from there.
+5. **Stop distance.** `2 x ATR / price`, clamped to 1%–15%. The clamp is a safety
+   rail: a flat-volatility reading would otherwise size a position far too large,
+   and a crisis reading would size one to nothing.
+6. **Sizing.** `equity x RISK_PCT / stop_fraction`, capped at `MAX_NOTIONAL_USD`,
+   truncated to the exchange's lot step, then validated against the venue's minimum
+   amount and minimum notional. Because the stop is in ATR units, the **USD at risk
+   stays constant** while the position size shrinks as volatility rises.
+7. **Execution (live only).** Market buy, then a `stop_loss_limit` sell at the
+   computed stop and a `limit` sell at twice the stop distance above, both for the
+   *filled* quantity.
+8. **Exit.** The script ends. The exchange takes it from there.
 
 ### What a run looks like
 
 ```text
 ======================================================================
-CCXT-Daily-Bot | 2026-09-29 | binance/BTC/USDT
+CCXT-Daily-Bot | 2026-09-30 | binance/BTC/USDT
 Mode: PAPER (no orders will be submitted)
 ======================================================================
-Closed candle 2026-09-28
-Close  : 83500.01000000 BTC/USDT
-20 SMA: 80706.58300000
+Closed candle 2026-09-29
+Close  : 83663.66000000 BTC/USDT
+20 SMA: 80974.44450000
+14 ATR: 2303.63428571  (2.75% of price)
 Signal : BULLISH (close above SMA)
 --------------------------------------------------------------
-Entry     : 83500.01000000 BTC/USDT (market buy)
-Size      : 0.00023000 BTC/USDT  (19.21 USDT)
-Stop-Loss : trigger 81830.01000000 / limit 81748.18000000
-Take-Profit: 86840.01000000
-Risk      : 0.3841 USDT   Reward: 0.7682 USDT   R:R = 2.00:1
+Sizing    : vol_target (1% of 200.00 USDT equity at risk)
+Entry     : 83663.66000000 BTC/USDT (market buy)
+Size      : 0.00043000 BTC/USDT  (35.98 USDT)
+Stop-Loss : trigger 79056.39000000 / limit 78977.33000000  (-5.51%)
+Take-Profit: 92878.20000000  (+11.01%)
+Risk      : 1.9811 USDT (0.99% of equity)   Reward: 3.9623 USDT   R:R = 2.00:1
 --------------------------------------------------------------
 PAPER TRADE: simulation complete. No orders submitted.
 ```
+
+Note what the ATR line is doing there: BTC's 14-day ATR is 2.75% of price, so a
+fixed 2% stop sits *inside* ordinary daily noise. The old bracket was
+structurally guaranteed to be hit by nothing more than a normal day. At 2x ATR
+the stop moves out to 5.51% and the position shrinks to hold the same 1% of
+equity at risk.
 
 ---
 

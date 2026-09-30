@@ -24,11 +24,56 @@ SYMBOL = "BTC/USDT"
 TIMEFRAME = "1d"
 SMA_PERIOD = 20
 
-# Number of candles to pull. SMA_PERIOD + 1 is the strict minimum; the extra
-# candles are spare in case the exchange returns a short series.
-CANDLE_LIMIT = 30
+# Number of candles to pull. Must cover SMA_PERIOD and ATR_PERIOD plus a small
+# margin, since the stop distance is derived from ATR.
+CANDLE_LIMIT = 40
 
 # --- Risk ---------------------------------------------------------------------
+# Sizing mode.
+#   "vol_target" -- size each trade from the asset's own volatility, so the USD
+#                   amount at risk is constant and the stop is a fixed multiple
+#                   of ATR.
+#   "fixed"      -- spend a constant notional behind a constant percentage stop.
+#
+# Use "vol_target". The evidence is in the README: a fixed 2% stop is tighter
+# than daily noise on these assets, so it is hit constantly and the bot
+# re-enters into the same downtrend bleeding fees. On the identical entry rule
+# this change moved expectancy from -0.384R to +0.098R per trade.
+#
+# To be clear about what this does and does not do: it makes the strategy
+# materially better, it does not make it profitable. Walk-forward validation
+# found no edge that survives out of sample. Do not read this constant as
+# approval to trade it with real money.
+SIZING_MODE = "vol_target"
+
+# Share of account equity put at risk on a single trade. 1% is conventional.
+RISK_PCT = 0.01
+
+# A stop 2x ATR away is roughly equidistant in volatility terms across assets
+# and regimes, which a fixed percentage is not.
+ATR_PERIOD = 14
+ATR_STOP_MULT = 2.0
+
+# Take-profit distance as a multiple of the stop distance. 2.0 reproduces the
+# original 2:1 reward:risk ratio.
+TARGET_RATIO = 2.0
+
+# Guards on the ATR-derived stop distance. ATR collapses in a quiet market and
+# explodes in a crash; without these, a flat-volatility reading would size a
+# position far larger than intended and a crisis reading would size one to dust.
+MIN_STOP_PCT = 0.01
+MAX_STOP_PCT = 0.15
+
+# Hard ceiling on a single position, whatever the risk arithmetic implies.
+MAX_NOTIONAL_USD = 200.0
+
+# Account equity used for sizing when the live balance is unavailable, which
+# includes paper mode. Set this to the size of the account you actually intend
+# to trade, because it determines position size.
+ACCOUNT_EQUITY_USD = 200.0
+
+# Only read when SIZING_MODE == "fixed", which is kept so the original bracket
+# can still be reproduced for comparison.
 TRADE_SIZE_USD = 20.0  # Quote-currency notional per trade ($20 is the floor on most venues)
 STOP_LOSS_PCT = 0.02  # 2% below entry
 TAKE_PROFIT_PCT = 0.04  # 4% above entry  ->  2:1 reward:risk

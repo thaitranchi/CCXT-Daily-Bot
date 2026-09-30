@@ -227,6 +227,25 @@ def record_run(state: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 # Stage 1 -- strategy signal
 # --------------------------------------------------------------------------- #
+def average_true_range(frame: pd.DataFrame, period: int) -> pd.Series:
+    """Average true range in price units, as a simple rolling mean.
+
+    Deliberately identical to ``backtest._atr`` -- Wilder smoothing instead would
+    read slightly lower here than the research engine used, which means sizing the
+    live bot on a different stop than the one that was validated.
+    """
+    prev_close = frame["close"].shift(1)
+    true_range = pd.concat(
+        [
+            frame["high"] - frame["low"],
+            (frame["high"] - prev_close).abs(),
+            (frame["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return true_range.rolling(window=period).mean()
+
+
 def evaluate_signal(exchange: ccxt.Exchange) -> tuple[bool, dict[str, float]]:
     """Return ``(is_bullish, context)`` from the last closed daily candle.
 
@@ -250,13 +269,15 @@ def evaluate_signal(exchange: ccxt.Exchange) -> tuple[bool, dict[str, float]]:
     )
     frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
     frame["sma"] = frame["close"].rolling(window=config.SMA_PERIOD).mean()
+    frame["atr"] = average_true_range(frame, config.ATR_PERIOD)
 
     # Drop the in-progress candle.
     closed = frame.iloc[:-1]
-    if len(closed) < config.SMA_PERIOD:
+    needed = max(config.SMA_PERIOD, config.ATR_PERIOD)
+    if len(closed) < needed:
         raise RuntimeError(
-            f"Need at least {config.SMA_PERIOD} closed candles to compute the "
-            f"SMA; got {len(closed)}."
+            f"Need at least {needed} closed candles to compute the SMA and ATR; "
+            f"got {len(closed)}."
         )
 
     latest = closed.iloc[-1]
@@ -270,11 +291,23 @@ def evaluate_signal(exchange: ccxt.Exchange) -> tuple[bool, dict[str, float]]:
         "candle_count": float(len(closed)),
     }
 
+    atr = float(latest["atr"]) if not pd.isna(latest["atr"]) else float("nan")
+    if config.SIZING_MODE == "vol_target" and (atr != atr or atr <= 0):
+        raise RuntimeError(
+            f"ATR is unusable ({atr!r}) on the latest closed candle; refusing to "
+            f"size a position from it."
+        )
+    context["atr"] = atr
+
     LOGGER.info("Closed candle %s", context["candle_date"])
     LOGGER.info("Close  : %.8f %s", context["close"], config.SYMBOL)
     LOGGER.info(
         "%d SMA: %.8f", config.SMA_PERIOD, context["sma"]
     )
+    if atr == atr:
+        LOGGER.info(
+            "%d ATR: %.8f  (%.2f%% of price)", config.ATR_PERIOD, atr, atr / context["close"] * 100
+        )
     LOGGER.info(
         "Signal : %s",
         "BULLISH (close above SMA)" if context["close"] > context["sma"] else "NO TRADE",
@@ -409,21 +442,75 @@ def reconcile(exchange: ccxt.Exchange, state: dict[str, Any], live: bool) -> boo
 # --------------------------------------------------------------------------- #
 # Stage 3 -- sizing and price construction
 # --------------------------------------------------------------------------- #
+def resolve_stop_fraction(atr: float, price: float) -> float:
+    """Stop distance as a fraction of entry, from ATR under vol targeting.
+
+    Clamped to ``MIN_STOP_PCT``/``MAX_STOP_PCT``. The clamp is a safety rail, not
+    a tuning knob: without a floor, a quiet market produces a tiny ATR, a tiny
+    stop, and a position size large enough to be reckless; without a ceiling, a
+    volatility spike produces a stop so wide that the position rounds to nothing.
+    """
+    raw = config.ATR_STOP_MULT * atr / price
+    return min(max(raw, config.MIN_STOP_PCT), config.MAX_STOP_PCT)
+
+
+def resolve_equity(exchange: ccxt.Exchange, live: bool) -> float:
+    """Account equity to size against.
+
+    Live mode reads the real quote balance, because sizing against a stale
+    configured number is how a bot quietly over-exposes an account. Paper mode
+    has no credentials, so it uses the configured figure.
+    """
+    if not live:
+        return config.ACCOUNT_EQUITY_USD
+
+    quote = exchange.market(config.SYMBOL)["quote"]
+    try:
+        total = retry_call("fetch_balance", exchange.fetch_balance).get("total", {})
+        equity = float(total.get(quote, 0) or 0)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "Could not read %s balance (%s); falling back to ACCOUNT_EQUITY_USD.",
+            quote,
+            exc,
+        )
+        return config.ACCOUNT_EQUITY_USD
+
+    if equity <= 0:
+        raise RuntimeError(
+            f"Total {quote} balance is zero. Refusing to size a position against "
+            f"no equity."
+        )
+    return equity
+
+
 def build_trade_plan(
-    exchange: ccxt.Exchange, entry_price: float
+    exchange: ccxt.Exchange, entry_price: float, equity: float, atr: float
 ) -> dict[str, float]:
     """Size the position and compute exit prices, honouring exchange limits."""
     market = exchange.market(config.SYMBOL)
     limits = market.get("limits") or {}
 
-    # amount_to_precision truncates, so the order lands at or just under
-    # TRADE_SIZE_USD and never overshoots the configured notional.
-    raw_amount = config.TRADE_SIZE_USD / entry_price
+    if config.SIZING_MODE == "vol_target":
+        stop_fraction = resolve_stop_fraction(atr, entry_price)
+        # Constant USD at risk, so position size falls as volatility rises.
+        target_notional = equity * config.RISK_PCT / stop_fraction
+        notional_target = min(target_notional, config.MAX_NOTIONAL_USD)
+        target_fraction = stop_fraction * config.TARGET_RATIO
+    else:
+        stop_fraction = config.STOP_LOSS_PCT
+        notional_target = config.TRADE_SIZE_USD
+        target_fraction = config.TAKE_PROFIT_PCT
+
+    # amount_to_precision truncates, so the order lands at or just under the
+    # target notional and never overshoots it.
+    raw_amount = notional_target / entry_price
     amount = float(exchange.amount_to_precision(config.SYMBOL, raw_amount))
     if amount <= 0:
         raise RuntimeError(
-            f"{config.TRADE_SIZE_USD} USDT is too small to buy a tradable amount of "
-            f"{config.SYMBOL} at {entry_price} (lot step truncates it to {amount})."
+            f"Target notional {notional_target:.2f} USDT is too small to buy a "
+            f"tradable amount of {config.SYMBOL} at {entry_price} (lot step "
+            f"truncates it to {amount})."
         )
 
     notional = amount * entry_price
@@ -442,10 +529,10 @@ def build_trade_plan(
     # price_to_precision rounds to the nearest tick, so the stop and target
     # land within half a tick of the intended percentages.
     sl_price = float(
-        exchange.price_to_precision(config.SYMBOL, entry_price * (1 - config.STOP_LOSS_PCT))
+        exchange.price_to_precision(config.SYMBOL, entry_price * (1 - stop_fraction))
     )
     tp_price = float(
-        exchange.price_to_precision(config.SYMBOL, entry_price * (1 + config.TAKE_PROFIT_PCT))
+        exchange.price_to_precision(config.SYMBOL, entry_price * (1 + target_fraction))
     )
 
     # A stop-limit needs its limit price strictly below its trigger price, and
@@ -480,6 +567,9 @@ def build_trade_plan(
     return {
         "amount": amount,
         "notional": notional,
+        "stop_fraction": stop_fraction,
+        "target_fraction": target_fraction,
+        "risk_pct_of_equity": (risk_usd / equity * 100) if equity > 0 else 0.0,
         "sl_price": sl_price,
         "sl_limit_price": sl_limit_price,
         "tp_price": tp_price,
@@ -489,16 +579,21 @@ def build_trade_plan(
     }
 
 
-def log_trade_plan(plan: dict[str, float], entry_price: float) -> None:
+def log_trade_plan(plan: dict[str, float], entry_price: float, equity: float) -> None:
     """Print the full intended trade, in paper mode and on submission."""
     LOGGER.info("-" * 62)
+    LOGGER.info("Sizing    : %s (%.0f%% of %.2f USDT equity at risk)",
+                config.SIZING_MODE, config.RISK_PCT * 100, equity)
     LOGGER.info("Entry     : %.8f %s (market buy)", entry_price, config.SYMBOL)
     LOGGER.info("Size      : %.8f %s  (%.2f USDT)", plan["amount"], config.SYMBOL, plan["notional"])
-    LOGGER.info("Stop-Loss : trigger %.8f / limit %.8f", plan["sl_price"], plan["sl_limit_price"])
-    LOGGER.info("Take-Profit: %.8f", plan["tp_price"])
+    LOGGER.info("Stop-Loss : trigger %.8f / limit %.8f  (-%.2f%%)",
+                plan["sl_price"], plan["sl_limit_price"], plan["stop_fraction"] * 100)
+    LOGGER.info("Take-Profit: %.8f  (+%.2f%%)",
+                plan["tp_price"], plan["target_fraction"] * 100)
     LOGGER.info(
-        "Risk      : %.4f USDT   Reward: %.4f USDT   R:R = %.2f:1",
+        "Risk      : %.4f USDT (%.2f%% of equity)   Reward: %.4f USDT   R:R = %.2f:1",
         plan["risk_usd"],
+        plan["risk_pct_of_equity"],
         plan["reward_usd"],
         plan["reward_risk"],
     )
@@ -700,8 +795,9 @@ def run_bot() -> int:
         save_state(state)
         return 0
 
-    plan = build_trade_plan(exchange, context["close"])
-    log_trade_plan(plan, context["close"])
+    equity = resolve_equity(exchange, live)
+    plan = build_trade_plan(exchange, context["close"], equity, context["atr"])
+    log_trade_plan(plan, context["close"], equity)
 
     if not live:
         LOGGER.info("PAPER TRADE: simulation complete. No orders submitted.")
