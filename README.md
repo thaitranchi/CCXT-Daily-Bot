@@ -64,14 +64,19 @@ are fast and do not hammer the exchange.
 | Script | What it answers |
 | --- | --- |
 | `python backtest.py` | How does the current `config.py` strategy do on its own symbol? |
-| `python sweep.py` | Which parameter values look best? (In-sample — treat as a hint.) |
-| `python validate.py` | Do the alternative signals beat the baseline, out of sample? |
+| `python sweep.py` | Why does a stop distance behave as it does? (**BTC only — survivor-biased**, see below) |
+| `python validate.py` | Do the alternative signals beat the baseline across the whole universe? |
 | `python walkforward.py` | **If I had run this search live, rolling forward, what would I have made?** |
 
 `walkforward.py` is the one to believe. It picks a configuration on a training
 window, trades it unedited over the next test window, and never looks back. It
 includes delisted pairs, and it bootstraps the result so the headline number
 carries an error bar.
+
+`validate.py` and `walkforward.py` use the survivorship-neutral universe. `backtest.py`
+and `sweep.py` are single-symbol, so they inherit the survivor bias that motivated
+building `universe.py` in the first place — fine for diagnosing mechanics, not for
+claiming an edge.
 
 ---
 
@@ -87,7 +92,12 @@ daily candles, 0.1% taker fee on both legs:
 | Volatility-targeted, 1% risk, 2xATR stops, 4 signal families searched | **-0.006 R/trade** | No edge. Searching across signal families actively destroys it. |
 | Volatility-targeted, 1% risk, 2xATR stops, single signal family | +0.086 R/trade | Looked promising until it met the block bootstrap. |
 
-Two conclusions worth stating plainly:
+`validate.py` reaches the same conclusion from the other direction. Across 32
+configurations x 119 symbols, **not one** was profitable on a majority of symbols
+either in-sample or out-of-sample, and all 32 had negative pooled out-of-sample R.
+The live rule managed 6 of 119 symbols out-of-sample, against a threshold of 71.
+
+Three conclusions worth stating plainly:
 
 **1. Sizing and stops mattered far more than signal choice.** Switching from fixed
 notional with fixed 2% stops to volatility-targeted sizing with ATR stops moved
@@ -96,6 +106,12 @@ expectancy from -0.384R to +0.098R on the same underlying entry rule. The fixed
 into the same downtrend, and it bled fees on the way down. This is the single
 biggest improvement in the project.
 
+`python sweep.py` finds the same thing by a completely independent route. Its
+280 configurations are all fixed-percentage, and the survivors are consistently
+the wide-stop ones — 4%/12%, 5%/15%, 7%/14% — while the live 2%/4% bracket is down
+**-43.3R in-sample and -15.9R out-of-sample** on BTC alone. Two unrelated methods
+converging on "the stops are too tight" is the most robust finding here.
+
 **2. There is still no proven edge.** A 6-month block bootstrap over time — the
 honest test, because all 100 coins share one market history — gives
 `95% CI [-0.150, +0.345]`, which **includes zero**. The per-year breakdown shows
@@ -103,6 +119,13 @@ why: +76R (2020), +299R (2021), -116R (2022), +253R (2023), +87R (2024), -223R
 (2025), -99R (2026). The gains arrive in bull markets and the losses arrive in
 bears. It also costs a 301R drawdown to earn 277R, so even the positive number
 would have been unpleasant to sit through.
+
+**3. Any number from `sweep.py` that looks good is partly a selection artifact.**
+It reports 9 of its top 10 in-sample candidates surviving out-of-sample, which
+looks encouraging until you notice it searched 280 configurations and split the
+history once. The walk-forward exists precisely because a single split is not
+enough, and it is the only number here that never saw its test data before
+choosing a configuration.
 
 **The live config has deliberately not been changed.** The volatility-targeting
 upgrade is well-evidenced enough to be worth adopting, but adopting it does not

@@ -15,6 +15,15 @@ hide it.
 Selection is deliberately restricted to round, conventional values. The more
 freely one may search, the more reliably one manufactures a fake winner.
 
+**Read the survivorship warning before trusting any number this prints.** This
+sweep runs on ``config.SYMBOL`` alone -- one symbol that is still listed today. A
+single survivor is the definition of a biased sample: coins that went to zero
+never get a chance to appear here. On BTC specifically this matters, because a
+parameter set that merely survives a nine-year bull market looks competent. Use
+``validate.py`` and ``walkforward.py`` for the survivorship-neutral answer; they
+include the ~39 delisted pairs. Treat this script as a way to understand *why* a
+stop distance behaves as it does, not as evidence that a strategy works.
+
 Reuses ``backtest.run_backtest`` so every candidate runs through the identical
 simulation code as the live bot. Read-only: no orders, no credentials.
 """
