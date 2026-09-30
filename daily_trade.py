@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, TypeVar
 
@@ -151,6 +152,76 @@ def save_state(state: dict[str, Any]) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+# --------------------------------------------------------------------------- #
+# Operational monitoring
+# --------------------------------------------------------------------------- #
+def notify(message: str, *, level: str = "error") -> None:
+    """Emit an operational alert.
+
+    Always logs, because a failure that only exists in a webhook that nobody
+    watches is not an alert. Additionally POSTs to ``ALERT_WEBHOOK_URL`` when one
+    is configured, using the stdlib so the bot keeps its dependency footprint.
+    Notification failure must never abort a run, so every error here is swallowed
+    after logging.
+    """
+    LOGGER.log(
+        logging.ERROR if level == "error" else logging.WARNING,
+        "ALERT: %s",
+        message,
+    )
+    url = config.ALERT_WEBHOOK_URL.strip()
+    if not url:
+        return
+    try:
+        payload = json.dumps(
+            {"text": f"CCXT-Daily-Bot [{config.SYMBOL}] {message}"}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=config.ALERT_TIMEOUT_SECONDS):
+            pass
+    except Exception as exc:  # noqa: BLE001 - alerting must not break trading
+        LOGGER.warning("Alert delivery failed: %s", exc)
+
+
+def check_run_continuity(state: dict[str, Any]) -> None:
+    """Alert when evaluation days were skipped while the bot was not running.
+
+    The bot evaluates one closed candle per run, so a machine that is off for
+    three days silently drops three signals. Nothing downstream can detect that,
+    because the skipped days simply never appear anywhere. Recording the last
+    evaluation date in state is the only way to notice.
+    """
+    last_run = state.get("last_run_date")
+    if not last_run:
+        return
+
+    try:
+        gap = (
+            datetime.fromisoformat(utc_today()).date()
+            - datetime.fromisoformat(last_run).date()
+        ).days
+    except ValueError:
+        LOGGER.warning("Unparseable last_run_date %r in state.", last_run)
+        return
+
+    if gap > 1:
+        notify(
+            f"{gap - 1} evaluation day(s) were missed between {last_run} and "
+            f"{utc_today()}. Those daily candles were never evaluated.",
+            level="warning",
+        )
+
+
+def record_run(state: dict[str, Any]) -> None:
+    """Stamp the evaluation date so the next run can detect gaps."""
+    state["last_run_date"] = utc_today()
 
 
 # --------------------------------------------------------------------------- #
@@ -610,17 +681,23 @@ def run_bot() -> int:
     state = load_state()
     state.setdefault("symbol", config.SYMBOL)
 
+    check_run_continuity(state)
+    record_run(state)
+
     if reconcile(exchange, state, live):
         LOGGER.info("A previous trade is still managed by the exchange. Nothing to do.")
+        save_state(state)
         return 0
 
     if state.get("last_entry_date") == utc_today():
         LOGGER.info("Already opened a position today. Skipping to avoid a double entry.")
+        save_state(state)
         return 0
 
     is_bullish, context = evaluate_signal(exchange)
     if not is_bullish:
         LOGGER.info("No trade. Price is below the %d SMA.", config.SMA_PERIOD)
+        save_state(state)
         return 0
 
     plan = build_trade_plan(exchange, context["close"])
@@ -628,6 +705,9 @@ def run_bot() -> int:
 
     if not live:
         LOGGER.info("PAPER TRADE: simulation complete. No orders submitted.")
+        # Still persist the run stamp, so missed-day alerting can be exercised in
+        # paper mode without going live.
+        save_state(state)
         return 0
 
     state["entry"] = execute_live(exchange, plan)
@@ -644,6 +724,10 @@ def main() -> int:
         return run_bot()
     except Exception as exc:  # noqa: BLE001 - top-level guard for the scheduler
         LOGGER.critical("Run aborted: %s", exc)
+        # A silent daily job is a daily job that quietly dies. If the process
+        # exits non-zero the scheduler may only ever write it to a log nobody
+        # reads, so push an alert before giving up.
+        notify(f"Run aborted: {exc}")
         return 1
 
 

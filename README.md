@@ -23,6 +23,12 @@ run finishes — the exchange manages the trade from that point on.
 * **No double entries.** A `state.json` file plus live order reconciliation
   prevents a second entry on the same day and sweeps up orphaned exit orders.
 * **Structured logs.** Console output plus a dated file under `logs/`.
+* **Missed-run detection.** A daily job that fails silently is worse than one that
+  crashes loudly. The bot compares the current date against the last recorded run
+  and reports how many daily candles were never evaluated, and it can POST a
+  webhook to Slack/Discord/ntfy when that happens or when a run fails.
+* **Research tooling.** Walk-forward validation, a survivorship-neutral symbol
+  universe, and a fee-aware backtest engine — all read-only, no orders.
 
 ---
 
@@ -31,16 +37,79 @@ run finishes — the exchange manages the trade from that point on.
 ```text
 CCXT-Daily-Bot/
 ├── .env.example        # Template for your API keys (copy to .env)
-├── .gitignore          # Ignores .env, state.json and logs/
+├── .gitignore          # Ignores .env, state.json, logs/ and cache/
 ├── config.py           # Strategy settings only — no secrets, safe to commit
 ├── daily_trade.py      # Signal evaluation and execution
+├── backtest.py         # Fee-aware backtest engine + OHLCV cache
+├── signals.py          # Pluggable entry signals
+├── universe.py         # Survivorship-neutral symbol universe (live + delisted)
+├── sweep.py            # Parameter sweep
+├── validate.py         # Multi-signal validation with statistical tests
+├── walkforward.py      # Rolling train/test walk-forward (the honest number)
 ├── requirements.txt    # Dependencies
 ├── README.md
 │
 ├── .env                # (you create this) — gitignored
 ├── state.json          # (created at runtime) — gitignored
+├── cache/              # (created at runtime) — gitignored
 └── logs/               # (created at runtime) — gitignored
 ```
+
+### Research scripts
+
+All of these are **read-only** — they never place orders and never read your API
+keys. They fetch public candles and cache them under `cache/`, so repeated runs
+are fast and do not hammer the exchange.
+
+| Script | What it answers |
+| --- | --- |
+| `python backtest.py` | How does the current `config.py` strategy do on its own symbol? |
+| `python sweep.py` | Which parameter values look best? (In-sample — treat as a hint.) |
+| `python validate.py` | Do the alternative signals beat the baseline, out of sample? |
+| `python walkforward.py` | **If I had run this search live, rolling forward, what would I have made?** |
+
+`walkforward.py` is the one to believe. It picks a configuration on a training
+window, trades it unedited over the next test window, and never looks back. It
+includes delisted pairs, and it bootstraps the result so the headline number
+carries an error bar.
+
+---
+
+## What the research actually found
+
+Run on the full Binance USDT universe (120 directional pairs, 81 still live and
+39 delisted, so the coin graveyard is included rather than quietly filtered out),
+daily candles, 0.1% taker fee on both legs:
+
+| Configuration | Out-of-sample expectancy | Verdict |
+| --- | --- | --- |
+| Fixed $20 notional, 2% stop / 4% target | **-0.384 R/trade** | Catastrophic. Re-enters into every collapse; 23.9% win rate against a 36.7% bar. |
+| Volatility-targeted, 1% risk, 2xATR stops, 4 signal families searched | **-0.006 R/trade** | No edge. Searching across signal families actively destroys it. |
+| Volatility-targeted, 1% risk, 2xATR stops, single signal family | +0.086 R/trade | Looked promising until it met the block bootstrap. |
+
+Two conclusions worth stating plainly:
+
+**1. Sizing and stops mattered far more than signal choice.** Switching from fixed
+notional with fixed 2% stops to volatility-targeted sizing with ATR stops moved
+expectancy from -0.384R to +0.098R on the same underlying entry rule. The fixed
+2% stop was simply too tight: ordinary daily noise triggered it, the bot re-entered
+into the same downtrend, and it bled fees on the way down. This is the single
+biggest improvement in the project.
+
+**2. There is still no proven edge.** A 6-month block bootstrap over time — the
+honest test, because all 100 coins share one market history — gives
+`95% CI [-0.150, +0.345]`, which **includes zero**. The per-year breakdown shows
+why: +76R (2020), +299R (2021), -116R (2022), +253R (2023), +87R (2024), -223R
+(2025), -99R (2026). The gains arrive in bull markets and the losses arrive in
+bears. It also costs a 301R drawdown to earn 277R, so even the positive number
+would have been unpleasant to sit through.
+
+**The live config has deliberately not been changed.** The volatility-targeting
+upgrade is well-evidenced enough to be worth adopting, but adopting it does not
+make the strategy profitable, and the parameters that *look* profitable were
+chosen by looking at the data that produced them. Anyone who wants to see the
+final, post-research configuration is welcome to switch `sizing` in `config.py`
+themselves, with the numbers above as the context for what to expect.
 
 ---
 

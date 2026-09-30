@@ -46,9 +46,35 @@ PAPER_TRADING = True
 MAX_RETRIES = 3  # Retries for transient exchange/network errors
 RETRY_BACKOFF_SECONDS = 2.0
 
+# --- Monitoring ---------------------------------------------------------------
+# A daily job that fails silently is worse than one that crashes loudly. Set
+# ALERT_WEBHOOK_URL to any endpoint accepting a JSON {"text": "..."} POST (Slack,
+# Discord, ntfy, a local relay). Left empty, alerts are written to the log only.
+# This is configuration, not a credential, so it is safe to commit.
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
+ALERT_TIMEOUT_SECONDS = 10.0
+
+# --- Fees ---------------------------------------------------------------------
+# Binance spot charges 0.1% taker on both legs. At TRADE_SIZE_USD = 20 that is
+# ~0.04 USDT of round-trip cost against ~0.39 USDT of risk -- material, so the
+# backtest charges it rather than pretending fills are free.
+TAKER_FEE_PCT = 0.001
+
+# --- Backtest -----------------------------------------------------------------
+# ~5000 daily candles is roughly thirteen years of BTC history, which is what the
+# sweep needs to leave a credible out-of-sample stretch after the 70/30 split.
+BACKTEST_CANDLES = 5000
+
+# When one daily candle touches both the stop and the take-profit, daily bars
+# cannot say which came first. "pessimistic" assumes the stop was hit, which is
+# the honest default; "optimistic" assumes the target and is reported only to
+# bracket the true outcome.
+AMBIGUOUS_CANDLE_POLICY = "pessimistic"
+
 # --- Runtime paths ------------------------------------------------------------
 STATE_FILE = BASE_DIR / "state.json"
 LOG_DIR = BASE_DIR / "logs"
+CACHE_DIR = BASE_DIR / "cache"  # OHLCV cache for research scripts (gitignored)
 
 
 def api_credentials(exchange_id: str = EXCHANGE_ID) -> dict[str, str]:

@@ -4,6 +4,7 @@
 # Runtime state written by daily_trade.py
 state.json
 logs/
+cache/
 
 # Python
 __pycache__/
