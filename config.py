@@ -2,6 +2,17 @@
 
 This module is safe to commit. It contains no secrets -- API credentials are
 read at runtime from a gitignored ``.env`` file (see ``.env.example``).
+
+.. warning::
+
+   This strategy has no proven edge and is not profitable. The out-of-sample
+   expectancy bootstrap CI is [-0.150, +0.345] -- it includes zero -- and across
+   32 configurations x 119 symbols not one stayed profitable on a majority of
+   symbols out-of-sample. See the README section "Is it profitable?".
+
+   The settings below are engineering that holds up under scrutiny. The risk
+   limits bound losses; they do not create an edge. Do not read any constant in
+   this file as approval to trade it with real money.
 """
 
 from __future__ import annotations
@@ -71,6 +82,39 @@ MAX_NOTIONAL_USD = 200.0
 # includes paper mode. Set this to the size of the account you actually intend
 # to trade, because it determines position size.
 ACCOUNT_EQUITY_USD = 200.0
+
+# --- Layer 3 risk limits -----------------------------------------------------
+# These are the deterministic guardrails in risk_engine.RiskExecutionEngine. They
+# are distinct from RISK_PCT above on purpose: RISK_PCT sizes a position,
+# MAX_TRADE_RISK_PCT caps what an already-sized position may lose. Sizing inside
+# the cap means the cap is almost never hit, so it stays an independent backstop
+# against a bad ATR reading or an upstream signal that ignored sizing entirely.
+MAX_TRADE_RISK_PCT = 0.01
+
+# Daily equity loss that halts new exposure. Exits stay available once tripped --
+# blocking them would strand an open position precisely when it needs closing.
+MAX_DAILY_DRAWDOWN_PCT = 0.03
+
+# Gross (absolute) exposure ceiling as a multiple of equity.
+#
+# This is deliberately set to 1.0, not the conventional 2.0x, because this bot
+# trades unlevered spot: there is no borrowing, so exposure cannot exceed equity
+# and a 2.0x cap is unreachable in normal operation -- the cash check already
+# binds first. What the ceiling is really guarding against is several brackets
+# being live at once and every one of them gapping through its stop, which costs
+# more than any single position could. 1.0 forbids adding to a position that
+# already holds the whole account. Raise it only if leverage is introduced, and
+# then re-check it against the cash-balance ordering in risk_engine.
+MAX_GROSS_EXPOSURE_RATIO = 1.0
+
+# Conviction an upstream signal must claim before the engine will look at it.
+MIN_CONVICTION = 0.70
+
+# Set True to make the engine reject every signal without consulting the rest of
+# the pipeline. This is the kill switch: it fails closed, so an operator can halt
+# trading without editing thresholds and without the engine needing a network or
+# an exchange connection to obey.
+TRADING_HALTED = False
 
 # Only read when SIZING_MODE == "fixed", which is kept so the original bracket
 # can still be reproduced for comparison.

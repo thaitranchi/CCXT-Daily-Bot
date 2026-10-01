@@ -1,5 +1,14 @@
 # CCXT-Daily-Bot
 
+> [!CAUTION]
+> **This strategy has no proven edge and is not profitable.** A 6-month block
+> bootstrap on the out-of-sample expectancy gives a 95% CI of
+> `[-0.150, +0.345]` — it includes zero. Across 32 configurations × 119 symbols,
+> not one stayed profitable on a majority of symbols out-of-sample. Do not run
+> this with money you cannot lose. See [Is it profitable?](#is-it-profitable).
+> Everything here is engineering that survives contact with reality; none of it
+> is evidence that the entry rule makes money.
+
 A lightweight, local Python trading bot built on **CCXT**. It evaluates daily
 candlesticks once per day against a 20-period Simple Moving Average and, on a
 bullish signal, buys at market and immediately posts a `STOP_LOSS_LIMIT` and a
@@ -29,6 +38,13 @@ run finishes — the exchange manages the trade from that point on.
   webhook to Slack/Discord/ntfy when that happens or when a run fails.
 * **Research tooling.** Walk-forward validation, a survivorship-neutral symbol
   universe, and a fee-aware backtest engine — all read-only, no orders.
+* **Deterministic risk gate (`risk_engine.py`).** Every trade plan is validated
+  against account-level limits — hard stop required, per-trade risk cap, daily
+  drawdown circuit breaker, gross exposure cap — before anything is submitted.
+  It fails closed, never raises on a bad signal, and always returns a reason.
+* **Local control dashboard (`dashboard.py`).** Loopback-only, read-only web UI
+  showing account state, the Layer 1-3 signal flow, guardrail status and an order
+  audit log. Adds `?demo=1` for reviewing the UI without credentials.
 
 ---
 
@@ -38,8 +54,11 @@ run finishes — the exchange manages the trade from that point on.
 CCXT-Daily-Bot/
 ├── .env.example        # Template for your API keys (copy to .env)
 ├── .gitignore          # Ignores .env, state.json, logs/ and cache/
-├── config.py           # Strategy settings only — no secrets, safe to commit
-├── daily_trade.py      # Signal evaluation and execution
+├── config.py           # Strategy + risk settings only — no secrets, safe to commit
+├── daily_trade.py      # Signal evaluation and execution, gated by risk_engine
+├── risk_engine.py      # Layer 3 deterministic risk gatekeeper
+├── dashboard.py        # Local read-only control dashboard (stdlib HTTP server)
+├── static/             # Dashboard assets (index.html, styles.css, app.js)
 ├── backtest.py         # Fee-aware backtest engine + OHLCV cache
 ├── signals.py          # Pluggable entry signals
 ├── universe.py         # Survivorship-neutral symbol universe (live + delisted)
@@ -80,7 +99,10 @@ claiming an edge.
 
 ---
 
-## What the research actually found
+## Is it profitable?
+
+No. This is the most important thing in this README, so it is also the first
+thing and repeated at the top.
 
 Run on the full Binance USDT universe (120 directional pairs, 81 still live and
 39 delisted, so the coin graveyard is included rather than quietly filtered out),
@@ -126,6 +148,12 @@ looks encouraging until you notice it searched 280 configurations and split the
 history once. The walk-forward exists precisely because a single split is not
 enough, and it is the only number here that never saw its test data before
 choosing a configuration.
+
+**4. Neither the risk engine nor the dashboard changes this.** `risk_engine.py`
+and `dashboard.py` bound losses and make the absence of edge visible. They add no
+edge whatsoever. A guardrail that reliably limits a loss on a strategy with no
+edge produces a strategy with no edge and smaller losses — which is worth having,
+and is not the same thing as being profitable.
 
 **The live config has deliberately not been changed.** The volatility-targeting
 upgrade is well-evidenced enough to be worth adopting, but adopting it does not

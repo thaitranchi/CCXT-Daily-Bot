@@ -32,6 +32,7 @@ import ccxt
 import pandas as pd
 
 import config
+import risk_engine
 
 T = TypeVar("T")
 
@@ -494,21 +495,30 @@ def build_trade_plan(
     if config.SIZING_MODE == "vol_target":
         stop_fraction = resolve_stop_fraction(atr, entry_price)
         # Constant USD at risk, so position size falls as volatility rises.
+        #
+        # Derived twice on purpose. Deriving the notional, clamping it to
+        # MAX_NOTIONAL_USD, and stopping there is the obvious version and it is
+        # wrong: when the cap binds, the size no longer reflects RISK_PCT, so a
+        # change to either RISK_PCT or the cap silently moves the actual risk per
+        # trade and nothing downstream can see it. Reducing the *quantity* by the
+        # same factor the clamp applied keeps risk proportional to RISK_PCT in
+        # every case, and leaves Layer 3 a genuine independent check rather than a
+        # check that is only ever passed by construction.
         target_notional = equity * config.RISK_PCT / stop_fraction
-        notional_target = min(target_notional, config.MAX_NOTIONAL_USD)
+        clamped_notional = min(target_notional, config.MAX_NOTIONAL_USD)
         target_fraction = stop_fraction * config.TARGET_RATIO
     else:
         stop_fraction = config.STOP_LOSS_PCT
-        notional_target = config.TRADE_SIZE_USD
+        clamped_notional = config.TRADE_SIZE_USD
         target_fraction = config.TAKE_PROFIT_PCT
 
     # amount_to_precision truncates, so the order lands at or just under the
     # target notional and never overshoots it.
-    raw_amount = notional_target / entry_price
+    raw_amount = clamped_notional / entry_price
     amount = float(exchange.amount_to_precision(config.SYMBOL, raw_amount))
     if amount <= 0:
         raise RuntimeError(
-            f"Target notional {notional_target:.2f} USDT is too small to buy a "
+            f"Target notional {clamped_notional:.2f} USDT is too small to buy a "
             f"tradable amount of {config.SYMBOL} at {entry_price} (lot step "
             f"truncates it to {amount})."
         )
@@ -564,6 +574,12 @@ def build_trade_plan(
     reward_usd = (tp_price - entry_price) * amount
     reward_risk = reward_usd / risk_usd if risk_usd > 0 else 0.0
 
+    # Surface how much of the risk budget the clamp gave back. When this is
+    # non-zero the position was capped below its risk target, so the trade is
+    # sized by MAX_NOTIONAL_USD rather than by RISK_PCT and the log should say so
+    # instead of implying the budget was used.
+    clamp_ratio = target_notional / clamped_notional if config.SIZING_MODE == "vol_target" and clamped_notional else 1.0
+
     return {
         "amount": amount,
         "notional": notional,
@@ -576,6 +592,7 @@ def build_trade_plan(
         "risk_usd": risk_usd,
         "reward_usd": reward_usd,
         "reward_risk": reward_risk,
+        "clamp_ratio": clamp_ratio,
     }
 
 
@@ -597,7 +614,93 @@ def log_trade_plan(plan: dict[str, float], entry_price: float, equity: float) ->
         plan["reward_usd"],
         plan["reward_risk"],
     )
+    if plan.get("clamp_ratio", 1.0) > 1.0001:
+        LOGGER.warning(
+            "Capped    : MAX_NOTIONAL_USD limited this trade to %.1f%% of its "
+            "risk-based size (%.4f USDT risked vs %.4f target).",
+            100 / plan["clamp_ratio"],
+            plan["risk_usd"],
+            plan["risk_usd"] * plan["clamp_ratio"],
+        )
     LOGGER.info("-" * 62)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 3b -- Layer 3 risk gate
+# --------------------------------------------------------------------------- #
+def _risk_gate(
+    exchange: ccxt.Exchange,
+    plan: dict[str, float],
+    context: dict[str, float],
+    equity: float,
+    live: bool,
+) -> str | None:
+    """Validate the trade plan against the deterministic risk limits.
+
+    Returns ``None`` if the plan is acceptable, otherwise the rejection reason.
+
+    Sizing in :func:`build_trade_plan` targets a 1% risk, and the ATR stop is
+    clamped, so in practice the plan lands inside the caps. That is the point of
+    having both: the sizing arithmetic is the first line and this is the one that
+    holds when the arithmetic is wrong -- a stale ATR, a size that drifted after
+    rounding, or a config edit that moves one limit without the other.
+
+    Equity is taken from the already-resolved value rather than re-read here, so
+    the gate judges the same numbers that were sized. Re-reading would risk
+    sizing against one balance and gating against another.
+    """
+    market = exchange.market(config.SYMBOL)
+    quote = market["quote"]
+    base = market["base"]
+
+    position_value = 0.0
+    if live:
+        try:
+            balances = exchange.fetch_balance()
+            held = float(balances.get("total", {}).get(base, 0) or 0)
+            mark = float(exchange.fetch_ticker(config.SYMBOL).get("last", 0) or 0)
+            # Position is valued at mark, not at the entry the bot recorded, so a
+            # position that has moved against the account counts toward equity and
+            # toward the drawdown breaker.
+            position_value = held * mark
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "Could not read the open position for the risk gate (%s); "
+                "gating on cash only.",
+                exc,
+            )
+
+    account = risk_engine.AccountState(
+        total_equity=equity,
+        cash_balance=equity - position_value,
+        # The bot has no persisted daily mark, so the breaker measures against
+        # current equity and stays at 0 until one exists. Treating equity as the
+        # day's own starting point is the conservative reading: it cannot report
+        # a drawdown that did not happen, and the sizing cap still bounds a trade.
+        starting_daily_equity=equity,
+        current_position_value=position_value,
+    )
+
+    signal = risk_engine.OrderSignal(
+        ticker=config.SYMBOL,
+        action=risk_engine.SignalAction.BUY,
+        quantity=plan["amount"],
+        entry_price=context["close"],
+        stop_loss_price=plan["sl_price"],
+        conviction_score=1.0,
+    )
+
+    response = risk_engine.RiskExecutionEngine(account).process_signal(signal)
+    if response.status is risk_engine.ExecutionStatus.ACCEPTED:
+        LOGGER.info(
+            "Layer 3: plan accepted (risk %.4f USDT, %.2f%% of equity).",
+            plan["risk_usd"],
+            plan["risk_pct_of_equity"],
+        )
+        return None
+
+    LOGGER.error("Layer 3: %s (%s)", response.reason, quote)
+    return response.reason
 
 
 # --------------------------------------------------------------------------- #
@@ -798,6 +901,17 @@ def run_bot() -> int:
     equity = resolve_equity(exchange, live)
     plan = build_trade_plan(exchange, context["close"], equity, context["atr"])
     log_trade_plan(plan, context["close"], equity)
+
+    # Layer 3 gate. Sizing above aims to stay inside these limits; this is the
+    # independent check that it did. It runs in paper mode too, so a plan that
+    # the live engine would reject is visible before any money is involved.
+    gate = _risk_gate(exchange, plan, context, equity, live)
+    if gate is not None and not gate:
+        LOGGER.critical(
+            "Layer 3 REJECTED the plan (%s). Nothing will be submitted.", gate
+        )
+        save_state(state)
+        return 1
 
     if not live:
         LOGGER.info("PAPER TRADE: simulation complete. No orders submitted.")

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading &amp; Risk Control Center</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="metric">
+    <span class="metric-label">Total Equity</span>
+    <span class="metric-value num" id="m-equity">--</span>
+    <span class="metric-sub" id="m-equity-sub">--</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Daily P&amp;L</span>
+    <span class="metric-value num" id="m-pnl">--</span>
+    <span class="metric-sub" id="m-pnl-sub">--</span>
+  </div>
+  <div class="metric" style="min-width:210px">
+    <span class="metric-label">Drawdown <span class="num" style="color:var(--dim)">/ <span id="m-dd-max">3.0%</span> max</span></span>
+    <div class="gauge">
+      <div class="gauge-track"><div class="gauge-fill" id="m-dd-fill" style="width:0%"></div></div>
+      <div class="gauge-foot"><span id="m-dd-val">0.00%</span><span>limit</span></div>
+    </div>
+  </div>
+  <div class="metric" style="min-width:190px">
+    <span class="metric-label">Gross Leverage</span>
+    <div class="gauge">
+      <div class="gauge-track"><div class="gauge-fill" id="m-lev-fill" style="width:0%"></div></div>
+      <div class="gauge-foot"><span class="num" id="m-lev-val">0.00x</span><span id="m-lev-max">2.00x max</span></div>
+    </div>
+  </div>
+  <div class="metric">
+    <span class="metric-label">System</span>
+    <span style="display:flex;gap:5px;margin-top:2px">
+      <span class="pill pill-mute" id="m-conn">CONNECTING</span>
+      <span class="pill pill-warn" id="m-paper">PAPER</span>
+    </span>
+    <span class="metric-sub" id="m-symbol">--</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="kill" id="kill" disabled>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+      <path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/>
+    </svg>
+    <span id="kill-text">HALT ALL TRADING</span>
+  </button>
+</header>
+
+<main class="grid">
+
+  <!-- ============ LAYER 1 ============ -->
+  <section class="col">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="layer-tag l1">L1</span>
+        <span class="panel-title">LLM Context &amp; News</span>
+        <span class="spacer"></span>
+        <span class="pill pill-info" id="l1-status">IDLE</span>
+      </div>
+      <div class="panel-body flush">
+        <div class="feed" id="news-feed">
+          <div class="empty">no ingested documents</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span class="layer-tag l1">L1</span>
+        <span class="panel-title">Extraction Schema</span>
+      </div>
+      <div class="panel-body">
+        <div class="feed-json" id="extraction">{
+  <span class="k">status</span>: "awaiting documents"
+}</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ LAYER 2 ============ -->
+  <section class="col">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="layer-tag l2">L2</span>
+        <span class="panel-title">Market &amp; Price Action</span>
+        <span class="spacer"></span>
+        <span class="metric-sub num" id="chart-range">--</span>
+      </div>
+      <div class="panel-body chart-wrap">
+        <canvas id="chart" height="330"></canvas>
+      </div>
+      <div class="legend">
+        <span style="color:var(--emerald)">SMA 20 trend</span>
+        <span style="color:var(--cyan)">ATR envelope</span>
+        <span style="color:var(--amber)">signal marker</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span class="layer-tag l2">L2</span>
+        <span class="panel-title">Model Signal Stream</span>
+        <span class="spacer"></span>
+        <span class="pill pill-mute" id="l2-status">NO SIGNAL</span>
+      </div>
+      <div class="panel-body" id="signal-stream">
+        <div class="empty">no active model signal</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ LAYER 3 ============ -->
+  <section class="col">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="layer-tag l3">L3</span>
+        <span class="panel-title">Deterministic Guardrails</span>
+        <span class="spacer"></span>
+        <span class="pill pill-mute" id="l3-status">--</span>
+      </div>
+      <div class="panel-body flush" id="guardrails">
+        <div class="empty">evaluating...</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span class="layer-tag l3">L3</span>
+        <span class="panel-title">Order Audit Log</span>
+        <span class="spacer"></span>
+        <span class="pill pill-mute" id="audit-count">0</span>
+      </div>
+      <div class="panel-body flush">
+        <div class="audit" id="audit">
+          <div class="empty">no orders processed</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
